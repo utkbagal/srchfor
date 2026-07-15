@@ -1,0 +1,112 @@
+DEFINE DATA LOCAL
+1 #RAW-LINE       (A133)
+1 #JCL-LINE       (A80)
+1 #MEMBER-NAME    (A8)
+1 #STEP-NAME      (A8)
+1 #IN-STEP        (L)   INIT <F>
+1 #IN-INLINE      (L)   INIT <F>
+1 #CONTINUED      (L)   INIT <F>
+1 #TEXT-START     (I4)  INIT <10>     /* CONFIRM against real sample output */
+1 #RPT
+  2 #R-MEMBER     (A8)
+  2 #R-STEP       (A8)
+  2 #R-LINE-TYPE  (A10)               /* 'JCL','DATA','CTLCARD'
+  2 #R-TEXT       (A80)
+END-DEFINE
+*
+REPEAT
+  READ WORK FILE 1 RECORD #RAW-LINE
+*
+  /* ---- SKIP RULER / BLANK / STATISTICS NOISE ---- */
+  IF #RAW-LINE(2:6) = ' '
+    ESCAPE BOTTOM                     /* blank banner/spacer line */
+  END-IF
+*
+  /* ---- MEMBER BOUNDARY BANNER ---- */
+  IF #RAW-LINE = MASK('..MEMBER..')   /* CONFIRM exact banner text/position */
+    #MEMBER-NAME := SUBSTRING(#RAW-LINE,20,8)   /* CONFIRM offset */
+    #IN-STEP     := FALSE
+    #IN-INLINE   := FALSE
+    #CONTINUED   := FALSE
+    ESCAPE BOTTOM
+  END-IF
+*
+  /* ---- PULL OUT THE REAL 80-BYTE JCL TEXT ---- */
+  IF SUBSTRING(#RAW-LINE,#TEXT-START,2) NE '//' AND
+     SUBSTRING(#RAW-LINE,#TEXT-START,2) NE '/*' AND
+     NOT #IN-INLINE
+    ESCAPE BOTTOM                     /* not a JCL statement line and not inline data - likely stats/ruler */
+  END-IF
+  #JCL-LINE := SUBSTRING(#RAW-LINE,#TEXT-START,80)
+*
+  /* ---- CONTINUATION OF A PRIOR EXEC/DD STATEMENT ---- */
+  IF #CONTINUED
+    #CONTINUED := #JCL-LINE(72:72) = ','
+    IF #IN-STEP
+      MOVE #MEMBER-NAME TO #R-MEMBER
+      MOVE #STEP-NAME   TO #R-STEP
+      MOVE 'JCL'        TO #R-LINE-TYPE
+      MOVE #JCL-LINE    TO #R-TEXT
+      WRITE WORK FILE 2 #RPT
+    END-IF
+    ESCAPE BOTTOM
+  END-IF
+*
+  /* ---- INSIDE INLINE FTP DATA (INPUT/SYSIN DD *) ---- */
+  IF #IN-INLINE
+    IF SUBSTRING(#JCL-LINE,1,2) = '//' OR SUBSTRING(#JCL-LINE,1,2) = '/*'
+      #IN-INLINE := FALSE
+      #IN-STEP   := FALSE
+    ELSE
+      MOVE #MEMBER-NAME TO #R-MEMBER
+      MOVE #STEP-NAME   TO #R-STEP
+      MOVE 'DATA'       TO #R-LINE-TYPE
+      MOVE #JCL-LINE    TO #R-TEXT
+      WRITE WORK FILE 2 #RPT
+      ESCAPE BOTTOM
+    END-IF
+  END-IF
+*
+  /* ---- DETECT NEW STEP START ---- */
+  IF #JCL-LINE(1:2) = '//' AND #JCL-LINE = MASK('..EXEC..PGM=FTP..')
+    #IN-STEP   := TRUE
+    #STEP-NAME := SUBSTRING(#JCL-LINE,3,8)
+    #CONTINUED := #JCL-LINE(72:72) = ','
+    MOVE #MEMBER-NAME TO #R-MEMBER
+    MOVE #STEP-NAME   TO #R-STEP
+    MOVE 'JCL'        TO #R-LINE-TYPE
+    MOVE #JCL-LINE    TO #R-TEXT
+    WRITE WORK FILE 2 #RPT
+    ESCAPE BOTTOM
+  END-IF
+*
+  /* ---- WITHIN AN ACTIVE STEP: DD STATEMENTS ---- */
+  IF #IN-STEP AND #JCL-LINE(1:2) = '//'
+    IF #JCL-LINE = MASK('..DD..*') OR #JCL-LINE = MASK('..DD..DATA')
+      #IN-INLINE := TRUE
+    ELSE IF #JCL-LINE = MASK('..DD..DSN=..')
+      MOVE #MEMBER-NAME TO #R-MEMBER
+      MOVE #STEP-NAME   TO #R-STEP
+      MOVE 'CTLCARD'    TO #R-LINE-TYPE
+      MOVE #JCL-LINE    TO #R-TEXT
+      WRITE WORK FILE 2 #RPT
+      ESCAPE BOTTOM
+    END-IF
+    #CONTINUED := #JCL-LINE(72:72) = ','
+    MOVE #MEMBER-NAME TO #R-MEMBER
+    MOVE #STEP-NAME   TO #R-STEP
+    MOVE 'JCL'        TO #R-LINE-TYPE
+    MOVE #JCL-LINE    TO #R-TEXT
+    WRITE WORK FILE 2 #RPT
+    ESCAPE BOTTOM
+  END-IF
+*
+  IF #IN-STEP AND #JCL-LINE(1:2) = '//' AND NOT #IN-INLINE
+    #IN-STEP := FALSE
+  END-IF
+*
+  AT END OF DATA
+    ESCAPE BOTTOM
+  END-ENDDATA
+END-REPEAT
+END
